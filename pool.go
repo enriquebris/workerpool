@@ -35,17 +35,20 @@ type Pool struct {
 	totalWorkersChan chan int
 	// channel to keep track of succeeded / failed jobs
 	fnSuccessChan chan bool
+
+	// log steps
+	verbose bool
 }
 
-func NewPool(initialWorkers int, maxJobsInChannel int) *Pool {
+func NewPool(initialWorkers int, maxJobsInChannel int, verbose bool) *Pool {
 	ret := &Pool{}
 
-	ret.initialize(initialWorkers, maxJobsInChannel)
+	ret.initialize(initialWorkers, maxJobsInChannel, verbose)
 
 	return ret
 }
 
-func (st *Pool) initialize(initialWorkers int, maxJobsInChannel int) {
+func (st *Pool) initialize(initialWorkers int, maxJobsInChannel int, verbose bool) {
 	st.jobsChan = make(chan interface{}, maxJobsInChannel)
 	st.totalWorkersChan = make(chan int, 100)
 	// the package will cause deadlock if st.fnSuccessChan is full
@@ -55,6 +58,8 @@ func (st *Pool) initialize(initialWorkers int, maxJobsInChannel int) {
 	st.workersStarted = false
 
 	st.initialWorkers = initialWorkers
+
+	st.verbose = verbose
 
 	// goroutine that controls the active workers successes / fails
 	go st.fnSuccessListener()
@@ -94,7 +99,9 @@ func (st *Pool) fnSuccessListener() {
 
 		if fnSuccess {
 			st.fnSuccessCounter++
-			log.Printf("fnSuccessCounter: %v workers: %v\n", st.fnSuccessCounter, st.totalWorkers)
+			if st.verbose {
+				log.Printf("[pool] fnSuccessCounter: %v workers: %v\n", st.fnSuccessCounter, st.totalWorkers)
+			}
 
 			if st.totalWaitUntilNSuccesses > 0 && st.fnSuccessCounter >= st.totalWaitUntilNSuccesses {
 				st.channelWaitUntilNSuccesses <- true
@@ -109,6 +116,7 @@ func (st *Pool) fnSuccessListener() {
 func (st *Pool) Wait() {
 	for {
 		if st.workersStarted && st.totalWorkers == 0 {
+			log.Println("[pool] No active workers. Wait() finished.")
 			return
 		}
 	}
@@ -124,7 +132,9 @@ func (st *Pool) WaitUntilNSuccesses(n int) {
 	// tell workers: do not accept / process new jobs && no new jobs can be accepted
 	st.doNotProcess = true
 
-	log.Printf("WaitUntilNSuccesses: %v . kill all workers: %v\n", st.fnSuccessCounter, st.totalWorkers)
+	if st.verbose {
+		log.Printf("[pool] WaitUntilNSuccesses: %v . kill all workers: %v\n", st.fnSuccessCounter, st.totalWorkers)
+	}
 
 	// kill all active workers
 	st.KillAllWorkers()
@@ -171,18 +181,29 @@ func (st *Pool) AddWorker() {
 
 // workerFunc keeps listening to st.jobsChan and executing st.fn(...)
 func (st *Pool) workerFunc(n int) {
+	defer func() {
+		// catch a panic that bubbled up
+		if r := recover(); r != nil {
+			// decrement the active workers counter by 1
+			st.totalWorkersChan <- -1
+
+			if st.verbose {
+				log.Printf("[pool] worker %v is going to be down because of a panic", n)
+			}
+		}
+	}()
 
 	// TODO ::: Add non-blocking channel operations ==> https://gobyexample.com/non-blocking-channel-operations
 
 	for taskData := range st.jobsChan {
-
-		// kill worker
+		// kill worker signal
 		if taskData == nil {
-
 			// decrement the active workers counter by 1
 			st.totalWorkersChan <- -1
 
-			log.Printf("[down] worker %v is going to be down", n)
+			if st.verbose {
+				log.Printf("[pool] worker %v is going to be down", n)
+			}
 
 			// kill worker
 			return
