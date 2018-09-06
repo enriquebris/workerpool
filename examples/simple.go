@@ -20,7 +20,7 @@ func main() {
 	// add the worker function
 	pool.SetWorkerFunc(func(data interface{}) bool {
 		log.Printf("processing %v\n", data)
-		// add a 1 second delay (only for the example)
+		// add a 1 second delay (to makes it look as it were processing the job)
 		time.Sleep(time.Second)
 		log.Printf("processing finished for: %v\n", data)
 
