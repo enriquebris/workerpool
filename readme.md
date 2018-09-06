@@ -64,7 +64,7 @@ pool.AddWorker()
 
 ### Kill a worker on the fly
 
-Kill a live worker once it is idle.
+Kill a live worker once it is idle or it finishes its current job.
 
 ```go
 pool.KillWorker()
@@ -72,10 +72,16 @@ pool.KillWorker()
 
 ### Kill all workers
 
-Kill all live workers once they finished processing the current jobs.
+Kill all live workers once they are idle or they finish processing their current jobs.
 
 ```go
 pool.KillWorker()
+```
+
+### Kill a worker after current enqueued jobs get processed
+
+```go
+pool.LateKillWorker()
 ```
 
 ### Wait while at least one worker is alive

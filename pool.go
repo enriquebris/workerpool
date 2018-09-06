@@ -276,9 +276,8 @@ func (st *Pool) AddTask(data interface{}) error {
 	return errors.New("No new jobs are accepted at this moment")
 }
 
-// KillWorker kills an inactive / idle worker
+// KillWorker kills an idle worker
 func (st *Pool) KillWorker() {
-	//st.jobsChan <- nil
 	st.immediateChan <- immediateSignalKillAfterTask
 }
 
@@ -292,6 +291,11 @@ func (st *Pool) KillAllWorkers() {
 	for i := 0; i < total; i++ {
 		st.KillWorker()
 	}
+}
+
+// LateKillWorker kills a worker only after all current jobs get processed
+func (st *Pool) LateKillWorker() {
+	st.jobsChan <- nil
 }
 
 // GetTotalWorkers returns the number of active workers.
