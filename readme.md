@@ -69,3 +69,25 @@ Kill a live worker once it is idle.
 ```go
 pool.KillWorker()
 ```
+
+### Kill all workers
+
+Kill all live workers once they finished processing the current jobs.
+
+```go
+pool.KillWorker()
+```
+
+### Wait while at least one worker is alive
+
+```go
+pool.Wait()
+```
+
+### Wait while n workers successfully finish their jobs
+
+The worker function returns true or false. True means that the job was successfully finished. False means the opposite.
+
+```go
+pool.WaitUntilNSuccesses(n)
+```
