@@ -100,7 +100,7 @@ func (st *Pool) fnSuccessListener() {
 		if fnSuccess {
 			st.fnSuccessCounter++
 			if st.verbose {
-				log.Printf("fnSuccessCounter: %v workers: %v\n", st.fnSuccessCounter, st.totalWorkers)
+				log.Printf("[pool] fnSuccessCounter: %v workers: %v\n", st.fnSuccessCounter, st.totalWorkers)
 			}
 
 			if st.totalWaitUntilNSuccesses > 0 && st.fnSuccessCounter >= st.totalWaitUntilNSuccesses {
@@ -116,6 +116,7 @@ func (st *Pool) fnSuccessListener() {
 func (st *Pool) Wait() {
 	for {
 		if st.workersStarted && st.totalWorkers == 0 {
+			log.Println("[pool] No active workers. Wait() finished.")
 			return
 		}
 	}
@@ -132,7 +133,7 @@ func (st *Pool) WaitUntilNSuccesses(n int) {
 	st.doNotProcess = true
 
 	if st.verbose {
-		log.Printf("WaitUntilNSuccesses: %v . kill all workers: %v\n", st.fnSuccessCounter, st.totalWorkers)
+		log.Printf("[pool] WaitUntilNSuccesses: %v . kill all workers: %v\n", st.fnSuccessCounter, st.totalWorkers)
 	}
 
 	// kill all active workers
@@ -180,19 +181,28 @@ func (st *Pool) AddWorker() {
 
 // workerFunc keeps listening to st.jobsChan and executing st.fn(...)
 func (st *Pool) workerFunc(n int) {
-
-	// TODO ::: Add non-blocking channel operations ==> https://gobyexample.com/non-blocking-channel-operations
-
-	for taskData := range st.jobsChan {
-
-		// kill worker
-		if taskData == nil {
-
+	defer func() {
+		// catch a panic that bubbled up
+		if r := recover(); r != nil {
 			// decrement the active workers counter by 1
 			st.totalWorkersChan <- -1
 
 			if st.verbose {
-				log.Printf("[down] worker %v is going to be down", n)
+				log.Printf("[pool] worker %v is going to be down because of a panic", n)
+			}
+		}
+	}()
+
+	// TODO ::: Add non-blocking channel operations ==> https://gobyexample.com/non-blocking-channel-operations
+
+	for taskData := range st.jobsChan {
+		// kill worker signal
+		if taskData == nil {
+			// decrement the active workers counter by 1
+			st.totalWorkersChan <- -1
+
+			if st.verbose {
+				log.Printf("[pool] worker %v is going to be down", n)
 			}
 
 			// kill worker

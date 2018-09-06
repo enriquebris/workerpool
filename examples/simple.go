@@ -38,6 +38,6 @@ func main() {
 		}
 	}()
 
-	// wait while at least one worker is active
+	// wait while at least one worker is alive
 	pool.Wait()
 }

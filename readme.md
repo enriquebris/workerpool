@@ -1,14 +1,14 @@
-##Go :: Pool of workers
+## Go :: Pool of workers
 Pool of workers that allows to dynamically update the number of active workers.
 
-##Installation
+## Installation
 ```bash
 go get github.com/enriquebris/workerpool
 ```
 
-##Examples
+## Examples
 
-###Simple usage
+### Simple usage
 
 ```go
 package main
