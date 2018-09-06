@@ -6,6 +6,10 @@ import (
 	"github.com/pkg/errors"
 )
 
+const (
+	immediateSignalKillAfterTask = 0
+)
+
 type PoolFunc func(interface{}) bool
 
 type Pool struct {
@@ -35,6 +39,8 @@ type Pool struct {
 	totalWorkersChan chan int
 	// channel to keep track of succeeded / failed jobs
 	fnSuccessChan chan bool
+	// channel to send "immediate" action's signals to workers
+	immediateChan chan byte
 
 	// log steps
 	verbose bool
@@ -69,6 +75,9 @@ func (st *Pool) initialize(initialWorkers int, maxJobsInChannel int, verbose boo
 
 	// channel to send the "done" to WaitUntilNSuccesses(...)
 	st.channelWaitUntilNSuccesses = make(chan bool)
+
+	// worker's immediate action channel
+	st.immediateChan = make(chan byte)
 }
 
 // workerListener listens to the workers up/down && keep track of the up workers (st.totalWorkers)
@@ -193,41 +202,68 @@ func (st *Pool) workerFunc(n int) {
 		}
 	}()
 
-	// TODO ::: Add non-blocking channel operations ==> https://gobyexample.com/non-blocking-channel-operations
-
-	for taskData := range st.jobsChan {
-		// kill worker signal
-		if taskData == nil {
-			// decrement the active workers counter by 1
-			st.totalWorkersChan <- -1
-
-			if st.verbose {
-				log.Printf("[pool] worker %v is going to be down", n)
+	keepWorking := true
+	for keepWorking {
+		select {
+		// listen to the immediate channel
+		case immediate, ok := <-st.immediateChan:
+			if !ok {
+				if st.verbose {
+					log.Printf("[pool] worker %v is going to be down because of the immediate channel is closed", n)
+				}
+				// break the loop
+				break
 			}
 
-			// kill worker
-			return
-		}
+			switch immediate {
+			// kill the worker
+			case immediateSignalKillAfterTask:
+				keepWorking = false
+				break
+			}
 
-		if st.doNotProcess {
-			// TODO ::: re-enqueue in a different queue/channel/struct
-			// re-enqueue the job / task
-			st.AddTask(taskData)
+		// listen to the jobs/tasks channel
+		case taskData, ok := <-st.jobsChan:
+			if !ok {
+				if st.verbose {
+					log.Printf("[pool] worker %v is going to be down because of the jobs channel is closed", n)
+				}
+				// break the loop
+				break
+			}
 
-		} else {
-			// execute the job
-			fnSuccess := st.fn(taskData)
+			// late kill signal
+			if taskData == nil {
+				if st.verbose {
+					log.Printf("[pool] worker %v is going to be down", n)
+				}
 
-			// avoid to cause deadlock
-			if !st.doNotProcess {
-				// keep track of the job's result
-				st.fnSuccessChan <- fnSuccess
+				// break the loop
+				break
+			}
+
+			if st.doNotProcess {
+				// TODO ::: re-enqueue in a different queue/channel/struct
+				// re-enqueue the job / task
+				st.AddTask(taskData)
+
 			} else {
-				// TODO ::: save the job result ...
+				// execute the job
+				fnSuccess := st.fn(taskData)
+
+				// avoid to cause deadlock
+				if !st.doNotProcess {
+					// keep track of the job's result
+					st.fnSuccessChan <- fnSuccess
+				} else {
+					// TODO ::: save the job result ...
+				}
 			}
 		}
-
 	}
+
+	// the worker is going to die, so decrement the active workers counter by 1
+	st.totalWorkersChan <- -1
 }
 
 // AddTask adds a new task / job
@@ -242,7 +278,8 @@ func (st *Pool) AddTask(data interface{}) error {
 
 // KillWorker kills an inactive / idle worker
 func (st *Pool) KillWorker() {
-	st.jobsChan <- nil
+	//st.jobsChan <- nil
+	st.immediateChan <- immediateSignalKillAfterTask
 }
 
 // KillAllWorkers kills all workers.

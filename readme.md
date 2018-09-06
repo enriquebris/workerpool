@@ -56,3 +56,16 @@ func main() {
 }
 
 ```
+
+### Add an extra worker on the fly
+```go
+pool.AddWorker()
+```
+
+### Kill a worker on the fly
+
+Kill a live worker once it is idle.
+
+```go
+pool.KillWorker()
+```
