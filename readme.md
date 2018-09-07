@@ -51,11 +51,53 @@ func main() {
 		}
 	}()
 
-	// wait while at least one worker is active
+	// wait while at least one worker is alive
 	pool.Wait()
 }
 
 ```
+
+### Set the worker's function
+
+Each time a worker receives a job, it invokes this function passing the job data as the only parameter.
+
+```go
+pool.SetWorkerFunc(func(data interface{}) bool {
+		// do the processing
+
+		// let the pool knows that the worker was able to complete the task
+		return true
+	})
+```
+
+### Enqueue a job
+```go
+pool.AddTask(data)
+```
+
+### Pass multiple data to be processed by a worker
+
+Let's suppose you have the following struct:
+
+```go
+type JobData struct {
+	Filename string
+	Path     string
+	Size     uint64
+}
+```
+
+then you can enqueue it as a job (to be processed by a worker):
+
+```go
+pool.AddTask(JobData{
+	Filename: "file.txt",
+	Path:     "/tmp/myfiles/",
+	Size:     1500,
+})
+```
+
+Keep in mind that the worker's function needs to cast the parameter as a JobData (that is on your side).
 
 ### Add an extra worker on the fly
 ```go
