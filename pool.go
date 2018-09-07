@@ -131,7 +131,11 @@ func (st *Pool) Wait() {
 	}
 }
 
-func (st *Pool) WaitUntilNSuccesses(n int) {
+func (st *Pool) WaitUntilNSuccesses(n int) error {
+	if st.fn == nil {
+		return errors.New("The Worker Func is needed to invoke WaitUntilNSuccesses. You should set it using SetWorkerFunc(...)")
+	}
+
 	st.totalWaitUntilNSuccesses = n
 
 	for range st.channelWaitUntilNSuccesses {
@@ -153,6 +157,8 @@ func (st *Pool) WaitUntilNSuccesses(n int) {
 
 	// tell workers: you can accept / process new jobs && start accepting new jobs
 	st.doNotProcess = false
+
+	return nil
 }
 
 // waitUntilNWorkers waits until ONLY n workers are up and running
@@ -170,11 +176,17 @@ func (st *Pool) SetWorkerFunc(fn PoolFunc) {
 }
 
 // StartWorkers start workers
-func (st *Pool) StartWorkers() {
+func (st *Pool) StartWorkers() error {
+
+	if st.fn == nil {
+		return errors.New("The Worker Func is needed to start the workers. You should set it using SetWorkerFunc(...)")
+	}
 
 	for i := 0; i < st.initialWorkers; i++ {
 		st.startWorker()
 	}
+
+	return nil
 }
 
 // startWorker starts a worker in a separate goroutine
