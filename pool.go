@@ -241,6 +241,7 @@ func (st *Pool) workerFunc(n int) {
 					log.Printf("[pool] worker %v is going to be down because of the jobs channel is closed", n)
 				}
 				// break the loop
+				keepWorking = false
 				break
 			}
 
