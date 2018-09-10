@@ -3,7 +3,7 @@ Pool of workers that allows to dynamically update the number of active workers.
 
 ## Installation
 ```bash
-go get github.com/enriquebris/workerpool
+go get gopkg.in/enriquebris/workerpool.v0
 ```
 
 ## Examples

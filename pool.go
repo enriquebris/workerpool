@@ -1,3 +1,4 @@
+// Package workerpool provides a simple way to manage a pool of workers and dynamically modify the number of workers.
 package workerpool
 
 import (
@@ -10,6 +11,7 @@ const (
 	immediateSignalKillAfterTask = 0
 )
 
+// PoolFunc defines the function signature to be implemented by the worker's func
 type PoolFunc func(interface{}) bool
 
 type Pool struct {
@@ -46,6 +48,7 @@ type Pool struct {
 	verbose bool
 }
 
+// NewPool creates, initializes and return a *Pool
 func NewPool(initialWorkers int, maxJobsInChannel int, verbose bool) *Pool {
 	ret := &Pool{}
 
@@ -121,7 +124,7 @@ func (st *Pool) fnSuccessListener() {
 	}
 }
 
-// Wait waits until all workers are not up and running
+// Wait waits while at least one worker is up and running
 func (st *Pool) Wait() {
 	for {
 		if st.workersStarted && st.totalWorkers == 0 {
@@ -131,6 +134,8 @@ func (st *Pool) Wait() {
 	}
 }
 
+// WaitUntilNSuccesses waits until n workers finished their job successfully.
+// A worker is considered successfully if the associated worker function returned true.
 func (st *Pool) WaitUntilNSuccesses(n int) error {
 	if st.fn == nil {
 		return errors.New("The Worker Func is needed to invoke WaitUntilNSuccesses. You should set it using SetWorkerFunc(...)")
@@ -170,12 +175,15 @@ func (st *Pool) waitUntilNWorkers(total int) {
 	return
 }
 
-// SetWorkerFunc sets the worker's function
+// SetWorkerFunc sets the worker's function.
+// This function will be invoked each time a worker receives a new job, and should return true to let know that the job
+// was successfully completed, or false in other case.
 func (st *Pool) SetWorkerFunc(fn PoolFunc) {
 	st.fn = fn
 }
 
-// StartWorkers start workers
+// StartWorkers start all workers. The number of workers was set at the Pool instantiation (NewPool(...) function).
+// It will return an error if the worker function was not previously set.
 func (st *Pool) StartWorkers() error {
 
 	if st.fn == nil {
@@ -195,7 +203,7 @@ func (st *Pool) startWorker() {
 	st.totalWorkersChan <- 1
 }
 
-// AddWorker adds a new worker to the pool
+// AddWorker adds a new worker to the pool.
 func (st *Pool) AddWorker() {
 	st.startWorker()
 }
@@ -279,7 +287,7 @@ func (st *Pool) workerFunc(n int) {
 	st.totalWorkersChan <- -1
 }
 
-// AddTask adds a new task / job
+// AddTask adds a task/job to the FIFO queue.
 func (st *Pool) AddTask(data interface{}) error {
 	if !st.doNotProcess {
 		st.jobsChan <- data
@@ -289,12 +297,14 @@ func (st *Pool) AddTask(data interface{}) error {
 	return errors.New("No new jobs are accepted at this moment")
 }
 
-// KillWorker kills an idle worker
+// KillWorker kills an idle worker.
+// The kill signal has a higher priority than the enqueued jobs. It means that a worker will be killed once it finishes its current job although there are unprocessed jobs in the queue.
+// Use LateKillWorker() in case you need to wait until current enqueued jobs get processed.
 func (st *Pool) KillWorker() {
 	st.immediateChan <- immediateSignalKillAfterTask
 }
 
-// KillAllWorkers kills all workers.
+// KillAllWorkers kills all alive workers.
 // If a worker is processing a job, it will not be killed, the pool will wait until it is idle.
 func (st *Pool) KillAllWorkers() {
 	// get the current "totalWorkers"
@@ -311,7 +321,7 @@ func (st *Pool) LateKillWorker() {
 	st.jobsChan <- nil
 }
 
-// GetTotalWorkers returns the number of active workers.
+// GetTotalWorkers returns the number of active/live workers.
 func (st *Pool) GetTotalWorkers() int {
 	return st.totalWorkers
 }
