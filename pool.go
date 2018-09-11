@@ -182,6 +182,26 @@ func (st *Pool) SetWorkerFunc(fn PoolFunc) {
 	st.fn = fn
 }
 
+// SetTotalWorkers sets the number of live workers.
+// It adjusts the current number of live workers based on the given number. In case that it have to kill some workers, it will wait until the current jobs get processed.
+func (st *Pool) SetTotalWorkers(n int) {
+	currentTotalWorkers := st.GetTotalWorkers()
+
+	// do nothing
+	if n < 0 || n == currentTotalWorkers {
+		return
+	}
+
+	// kill some workers
+	if n < currentTotalWorkers {
+		st.KillWorkers(currentTotalWorkers - n)
+		return
+	}
+
+	// add extra workers
+	st.AddWorkers(n - currentTotalWorkers)
+}
+
 // StartWorkers start all workers. The number of workers was set at the Pool instantiation (NewPool(...) function).
 // It will return an error if the worker function was not previously set.
 func (st *Pool) StartWorkers() error {
