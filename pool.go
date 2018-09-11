@@ -260,6 +260,7 @@ func (st *Pool) workerFunc(n int) {
 				}
 
 				// break the loop
+				keepWorking = false
 				break
 			}
 
@@ -319,6 +320,17 @@ func (st *Pool) KillAllWorkers() {
 // LateKillWorker kills a worker only after all current jobs get processed
 func (st *Pool) LateKillWorker() {
 	st.jobsChan <- nil
+}
+
+// LateKillAllWorkers kill all live workers only after all current jobs get processed
+func (st *Pool) LateKillAllWorkers() {
+	// get the current "totalWorkers"
+	total := st.totalWorkers
+
+	// kill all workers
+	for i := 0; i < total; i++ {
+		st.LateKillWorker()
+	}
 }
 
 // GetTotalWorkers returns the number of active/live workers.
