@@ -182,6 +182,26 @@ func (st *Pool) SetWorkerFunc(fn PoolFunc) {
 	st.fn = fn
 }
 
+// SetTotalWorkers sets the number of live workers.
+// It adjusts the current number of live workers based on the given number. In case that it have to kill some workers, it will wait until the current jobs get processed.
+func (st *Pool) SetTotalWorkers(n int) {
+	currentTotalWorkers := st.GetTotalWorkers()
+
+	// do nothing
+	if n < 0 || n == currentTotalWorkers {
+		return
+	}
+
+	// kill some workers
+	if n < currentTotalWorkers {
+		st.KillWorkers(currentTotalWorkers - n)
+		return
+	}
+
+	// add extra workers
+	st.AddWorkers(n - currentTotalWorkers)
+}
+
 // StartWorkers start all workers. The number of workers was set at the Pool instantiation (NewPool(...) function).
 // It will return an error if the worker function was not previously set.
 func (st *Pool) StartWorkers() error {
@@ -201,11 +221,6 @@ func (st *Pool) StartWorkers() error {
 func (st *Pool) startWorker() {
 	// increment the active workers counter by 1 ==> start a new worker (st.workerListener())
 	st.totalWorkersChan <- 1
-}
-
-// AddWorker adds a new worker to the pool.
-func (st *Pool) AddWorker() {
-	st.startWorker()
 }
 
 // workerFunc keeps listening to st.jobsChan and executing st.fn(...)
@@ -260,6 +275,7 @@ func (st *Pool) workerFunc(n int) {
 				}
 
 				// break the loop
+				keepWorking = false
 				break
 			}
 
@@ -297,11 +313,38 @@ func (st *Pool) AddTask(data interface{}) error {
 	return errors.New("No new jobs are accepted at this moment")
 }
 
+// AddWorker adds a new worker to the pool.
+func (st *Pool) AddWorker() {
+	st.startWorker()
+}
+
+// AddWorkers adds n extra workers to the pool.
+func (st *Pool) AddWorkers(n int) {
+	for i := 0; i < n; i++ {
+		st.startWorker()
+	}
+}
+
 // KillWorker kills an idle worker.
 // The kill signal has a higher priority than the enqueued jobs. It means that a worker will be killed once it finishes its current job although there are unprocessed jobs in the queue.
 // Use LateKillWorker() in case you need to wait until current enqueued jobs get processed.
 func (st *Pool) KillWorker() {
 	st.immediateChan <- immediateSignalKillAfterTask
+}
+
+// KillWorkers kills n idle workers.
+// If n > GetTotalWorkers(), then this function will assign GetTotalWorkers() to n.
+// The kill signal has a higher priority than the enqueued jobs. It means that a worker will be killed once it finishes its current job although there are unprocessed jobs in the queue.
+// Use LateKillAllWorkers() ot LateKillWorker() in case you need to wait until current enqueued jobs get processed.
+func (st *Pool) KillWorkers(n int) {
+	totalWorkers := st.GetTotalWorkers()
+	if n > totalWorkers {
+		n = totalWorkers
+	}
+
+	for i := 0; i < n; i++ {
+		st.KillWorker()
+	}
 }
 
 // KillAllWorkers kills all alive workers.
@@ -316,9 +359,35 @@ func (st *Pool) KillAllWorkers() {
 	}
 }
 
-// LateKillWorker kills a worker only after all current jobs get processed
+// LateKillWorker kills a worker only after all current jobs get processed.
 func (st *Pool) LateKillWorker() {
 	st.jobsChan <- nil
+}
+
+// LateKillWorkers kills n workers only after all current jobs get processed.
+// If n > GetTotalWorkers(), then this function will assign GetTotalWorkers() to n.
+func (st *Pool) LateKillWorkers(n int) {
+	// get the current "totalWorkers"
+	totalWorkers := st.totalWorkers
+
+	if n > totalWorkers {
+		n = totalWorkers
+	}
+
+	for i := 0; i < n; i++ {
+		st.LateKillWorker()
+	}
+}
+
+// LateKillAllWorkers kill all live workers only after all current jobs get processed
+func (st *Pool) LateKillAllWorkers() {
+	// get the current "totalWorkers"
+	total := st.totalWorkers
+
+	// kill all workers
+	for i := 0; i < total; i++ {
+		st.LateKillWorker()
+	}
 }
 
 // GetTotalWorkers returns the number of active/live workers.
