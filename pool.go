@@ -27,6 +27,11 @@ const (
 	workerActionImmediateChanelClosedConfirmation = "immediateChannelClosed.confirmation"
 	// SetTotalWorkers action
 	workerActionSetTotalWorkers = "setTotalWorkers"
+
+	// Wait()
+	waitForWait = "wait"
+	// WaitUntilNSuccesses()
+	waitForNSuccesses = "waitNSuccesses"
 )
 
 // PoolFunc defines the function signature to be implemented by the worker's func
@@ -46,8 +51,6 @@ type Pool struct {
 
 	// total needed job successes to finish WaitUntilNSuccesses(...)
 	totalWaitUntilNSuccesses int
-	// channel to send the "done" to WaitUntilNSuccesses(...)
-	channelWaitUntilNSuccesses chan bool
 
 	// how many workers succeeded
 	fnSuccessCounter int
@@ -61,6 +64,13 @@ type Pool struct {
 	fnSuccessChan chan bool
 	// channel to send "immediate" action's signals to workers
 	immediateChan chan byte
+
+	// flag to know whether a Wait() function was called
+	waitFor string
+	// channel to wait the "done" signal for Wait()
+	waitForWaitChannel chan bool
+	// channel to send the "done" signal for WaitUntilNSuccesses(...)
+	waitForNSuccessesChannel chan bool
 
 	// log steps
 	verbose bool
@@ -103,11 +113,11 @@ func (st *Pool) initialize(initialWorkers int, maxJobsInChannel int, verbose boo
 	// goroutine that controls the active workers counter
 	go st.workerListener()
 
-	// channel to send the "done" to WaitUntilNSuccesses(...)
-	st.channelWaitUntilNSuccesses = make(chan bool)
-
 	// worker's immediate action channel
 	st.immediateChan = make(chan byte)
+
+	st.waitForWaitChannel = make(chan bool)
+	st.waitForNSuccessesChannel = make(chan bool)
 }
 
 // workerListener handles all up/down worker operations && keeps workers stats updated (st.totalWorkers)
@@ -207,6 +217,16 @@ func (st *Pool) workerListener() {
 			}
 
 		default:
+			switch st.waitFor {
+			case waitForWait:
+				if st.workersStarted && st.GetTotalWorkers() == 0 {
+					// send the signal to Wait() to let it know that no workers are alive
+					st.waitForWaitChannel <- true
+				}
+
+			case waitForNSuccesses:
+				// this case is handled by st.fnSuccessListener()
+			}
 		}
 	}
 }
@@ -222,7 +242,7 @@ func (st *Pool) fnSuccessListener() {
 			}
 
 			if st.totalWaitUntilNSuccesses > 0 && st.fnSuccessCounter >= st.totalWaitUntilNSuccesses {
-				st.channelWaitUntilNSuccesses <- true
+				st.waitForNSuccessesChannel <- true
 			}
 		} else {
 			st.fnFailCounter++
@@ -231,13 +251,25 @@ func (st *Pool) fnSuccessListener() {
 }
 
 // Wait waits while at least one worker is up and running
-func (st *Pool) Wait() {
-	for {
-		if st.workersStarted && st.totalWorkers == 0 {
-			log.Println("[pool] No active workers. Wait() finished.")
-			return
-		}
+func (st *Pool) Wait() error {
+	if st.fn == nil {
+		return errors.Errorf(errorNoWorkerFuncMsg, "WaitUntilNSuccesses")
 	}
+
+	// set the waitFor flag for Wait()
+	st.waitFor = waitForWait
+
+	// wait here until all workers are done
+	<-st.waitForWaitChannel
+
+	// free the flag
+	st.waitFor = ""
+
+	if st.verbose {
+		log.Println("[pool] No active workers. Wait() finished.")
+	}
+
+	return nil
 }
 
 // WaitUntilNSuccesses waits until n workers finished their job successfully.
@@ -248,11 +280,20 @@ func (st *Pool) WaitUntilNSuccesses(n int) error {
 		return errors.Errorf(errorNoWorkerFuncMsg, "WaitUntilNSuccesses")
 	}
 
+	// set the number of jobs that have to be successfully processed
 	st.totalWaitUntilNSuccesses = n
 
-	for range st.channelWaitUntilNSuccesses {
-		break
-	}
+	// set the waitFor flag for Wait()
+	st.waitFor = waitForNSuccesses
+
+	// wait until n jobs get successfully processed
+	<-st.waitForNSuccessesChannel
+
+	// set the number of successful jobs to wait for to zero
+	st.totalWaitUntilNSuccesses = 0
+
+	// free the flag
+	st.waitFor = ""
 
 	// tell workers: do not accept / process new jobs && no new jobs can be accepted
 	st.doNotProcess = true
@@ -264,22 +305,10 @@ func (st *Pool) WaitUntilNSuccesses(n int) error {
 	// kill all active workers
 	st.KillAllWorkers()
 
-	// wait until all workers were stopped
-	st.waitUntilNWorkers(0)
-
 	// tell workers: you can accept / process new jobs && start accepting new jobs
 	st.doNotProcess = false
 
 	return nil
-}
-
-// waitUntilNWorkers waits until ONLY n workers are up and running
-func (st *Pool) waitUntilNWorkers(total int) {
-
-	for st.totalWorkers != total {
-	}
-
-	return
 }
 
 // SetWorkerFunc sets the worker's function.
