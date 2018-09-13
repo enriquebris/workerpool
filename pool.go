@@ -9,6 +9,24 @@ import (
 
 const (
 	immediateSignalKillAfterTask = 0
+	errorNoWorkerFuncMsg         = "The Worker Func is needed to invoke %v. You should set it using SetWorkerFunc(...)"
+
+	// "add new worker(s)" signal
+	workerActionAdd = "add"
+	// "kill worker(s)" signal
+	workerActionKill = "kill"
+	// confirm that a worker exited because a workerActionKill signal
+	workerActionKillConfirmation = "kill.confirmation"
+	// "kill late worker" signal
+	workerActionLateKill = "lateKill"
+	// confirm that a worker exited because a workerActionKillConfirmation signal
+	workerActionLateKillConfirmation = "lateKill.confirmation"
+	// confirm that a worker exited because an unhandled panic
+	workerActionPanicKillConfirmation = "panicKill.confirmation"
+	// confirm that a worker exited because the immediate channel is closed
+	workerActionImmediateChanelClosedConfirmation = "immediateChannelClosed.confirmation"
+	// SetTotalWorkers action
+	workerActionSetTotalWorkers = "setTotalWorkers"
 )
 
 // PoolFunc defines the function signature to be implemented by the worker's func
@@ -38,7 +56,7 @@ type Pool struct {
 	// channel to send jobs, workers listen to this channel
 	jobsChan chan interface{}
 	// channel to keep track of how many workers are up
-	totalWorkersChan chan int
+	totalWorkersChan chan workerAction
 	// channel to keep track of succeeded / failed jobs
 	fnSuccessChan chan bool
 	// channel to send "immediate" action's signals to workers
@@ -46,6 +64,15 @@ type Pool struct {
 
 	// log steps
 	verbose bool
+}
+
+// workerAction have the data related to worker's actions:
+//  - add new worker
+//  - kill worker
+//  - late kill worker
+type workerAction struct {
+	Action string
+	Value  int
 }
 
 // NewPool creates, initializes and return a *Pool
@@ -59,7 +86,7 @@ func NewPool(initialWorkers int, maxJobsInChannel int, verbose bool) *Pool {
 
 func (st *Pool) initialize(initialWorkers int, maxJobsInChannel int, verbose bool) {
 	st.jobsChan = make(chan interface{}, maxJobsInChannel)
-	st.totalWorkersChan = make(chan int, 100)
+	st.totalWorkersChan = make(chan workerAction, 100)
 	// the package will cause deadlock if st.fnSuccessChan is full
 	st.fnSuccessChan = make(chan bool, maxJobsInChannel)
 
@@ -83,24 +110,103 @@ func (st *Pool) initialize(initialWorkers int, maxJobsInChannel int, verbose boo
 	st.immediateChan = make(chan byte)
 }
 
-// workerListener listens to the workers up/down && keep track of the up workers (st.totalWorkers)
+// workerListener handles all up/down worker operations && keeps workers stats updated (st.totalWorkers)
 func (st *Pool) workerListener() {
+	keepListening := true
+	for keepListening {
+		select {
+		case message, ok := <-st.totalWorkersChan:
+			// st.totalWorkersChan is closed
+			if !ok {
+				keepListening = false
+				break
+			}
 
-	for waitN := range st.totalWorkersChan {
+			switch message.Action {
+			// add new worker(s)
+			case workerActionAdd:
+				for i := 0; i < message.Value; i++ {
+					// execute the worker function
+					go st.workerFunc(st.totalWorkers)
+					st.totalWorkers += 1
 
-		st.totalWorkers += waitN
+					// check whether all workers were started
+					if !st.workersStarted && st.totalWorkers == st.initialWorkers {
+						// the workers were started
+						st.workersStarted = true
+					}
+				}
 
-		// add a new worker
-		if waitN > 0 {
+			// kill worker(s)
+			case workerActionKill:
+				totalWorkers := st.GetTotalWorkers()
+				if message.Value > totalWorkers {
+					message.Value = totalWorkers
+				} else {
+					if message.Value == -1 {
+						message.Value = totalWorkers
+					}
+				}
 
-			// execute the worker function
-			go st.workerFunc(st.totalWorkers)
-		}
+				for i := 0; i < message.Value; i++ {
+					st.immediateChan <- immediateSignalKillAfterTask
+				}
 
-		// check whether all workers were started
-		if st.totalWorkers == st.initialWorkers {
-			// the workers were started
-			st.workersStarted = true
+			// "kill worker" confirmation from the worker
+			// the worker was killed because a "immediate kill" signal
+			case workerActionKillConfirmation:
+				st.totalWorkers -= message.Value
+
+			// late kill worker(s)
+			case workerActionLateKill:
+				totalWorkers := st.GetTotalWorkers()
+				if message.Value > totalWorkers {
+					message.Value = totalWorkers
+				} else {
+					if message.Value == -1 {
+						message.Value = totalWorkers
+					}
+				}
+
+				for i := 0; i < message.Value; i++ {
+					st.jobsChan <- nil
+				}
+
+			// "late kill worker" confirmation from the worker
+			// the worker was killed because a "late kill" signal
+			case workerActionLateKillConfirmation:
+				st.totalWorkers -= message.Value
+
+			// "immediate channel closed kill worker" confirmation from the worker
+			// the worker was killed because the immediate channel is closed
+			case workerActionImmediateChanelClosedConfirmation:
+				st.totalWorkers -= message.Value
+
+			// "panic kill worker" confirmation from the worker
+			// the worker was killed because an unhandled panic
+			case workerActionPanicKillConfirmation:
+				st.totalWorkers -= message.Value
+
+			// SetTotalWorkers(n)
+			case workerActionSetTotalWorkers:
+				currentTotalWorkers := st.GetTotalWorkers()
+
+				// do nothing
+				if message.Value < 0 || message.Value == currentTotalWorkers {
+					continue
+				}
+
+				// kill some workers
+				if message.Value < currentTotalWorkers {
+					st.KillWorkers(currentTotalWorkers - message.Value)
+					continue
+				}
+
+				// add extra workers
+				st.AddWorkers(message.Value - currentTotalWorkers)
+			}
+
+		default:
 		}
 	}
 }
@@ -136,9 +242,10 @@ func (st *Pool) Wait() {
 
 // WaitUntilNSuccesses waits until n workers finished their job successfully.
 // A worker is considered successfully if the associated worker function returned true.
+// An error will be returned if the worker's function is not already set.
 func (st *Pool) WaitUntilNSuccesses(n int) error {
 	if st.fn == nil {
-		return errors.New("The Worker Func is needed to invoke WaitUntilNSuccesses. You should set it using SetWorkerFunc(...)")
+		return errors.Errorf(errorNoWorkerFuncMsg, "WaitUntilNSuccesses")
 	}
 
 	st.totalWaitUntilNSuccesses = n
@@ -185,51 +292,55 @@ func (st *Pool) SetWorkerFunc(fn PoolFunc) {
 // SetTotalWorkers sets the number of live workers.
 // It adjusts the current number of live workers based on the given number. In case that it have to kill some workers, it will wait until the current jobs get processed.
 func (st *Pool) SetTotalWorkers(n int) {
-	currentTotalWorkers := st.GetTotalWorkers()
-
-	// do nothing
-	if n < 0 || n == currentTotalWorkers {
-		return
+	// sends a "set total workers" signal, to be processed by workerListener()
+	st.totalWorkersChan <- workerAction{
+		Action: workerActionSetTotalWorkers,
+		Value:  n,
 	}
-
-	// kill some workers
-	if n < currentTotalWorkers {
-		st.KillWorkers(currentTotalWorkers - n)
-		return
-	}
-
-	// add extra workers
-	st.AddWorkers(n - currentTotalWorkers)
 }
 
 // StartWorkers start all workers. The number of workers was set at the Pool instantiation (NewPool(...) function).
 // It will return an error if the worker function was not previously set.
 func (st *Pool) StartWorkers() error {
-
-	if st.fn == nil {
-		return errors.New("The Worker Func is needed to start the workers. You should set it using SetWorkerFunc(...)")
-	}
-
+	var err error
 	for i := 0; i < st.initialWorkers; i++ {
-		st.startWorker()
+		if err = st.startWorker(); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
 // startWorker starts a worker in a separate goroutine
-func (st *Pool) startWorker() {
-	// increment the active workers counter by 1 ==> start a new worker (st.workerListener())
-	st.totalWorkersChan <- 1
+// It will return an error if the worker function was not previously set.
+func (st *Pool) startWorker() error {
+	if st.fn == nil {
+		return errors.Errorf(errorNoWorkerFuncMsg, "startWorker")
+	}
+
+	// increment the active workers by 1
+	st.totalWorkersChan <- workerAction{
+		Action: workerActionAdd,
+		Value:  1,
+	}
+
+	return nil
 }
 
 // workerFunc keeps listening to st.jobsChan and executing st.fn(...)
 func (st *Pool) workerFunc(n int) {
+	// default kill worker confirmation
+	killWorkerConfirmation := workerActionPanicKillConfirmation
+
 	defer func() {
 		// catch a panic that bubbled up
 		if r := recover(); r != nil {
-			// decrement the active workers counter by 1
-			st.totalWorkersChan <- -1
+			// decrement the active workers by 1
+			st.totalWorkersChan <- workerAction{
+				Action: workerActionPanicKillConfirmation,
+				Value:  1,
+			}
 
 			if st.verbose {
 				log.Printf("[pool] worker %v is going to be down because of a panic", n)
@@ -246,13 +357,21 @@ func (st *Pool) workerFunc(n int) {
 				if st.verbose {
 					log.Printf("[pool] worker %v is going to be down because of the immediate channel is closed", n)
 				}
+
+				// confirm that the worker was killed due to the immediate channel is closed
+				killWorkerConfirmation = workerActionImmediateChanelClosedConfirmation
+
 				// break the loop
+				keepWorking = false
 				break
 			}
 
 			switch immediate {
 			// kill the worker
 			case immediateSignalKillAfterTask:
+				// confirm that the worker was killed due to a workerActionKill signal
+				killWorkerConfirmation = workerActionKillConfirmation
+
 				keepWorking = false
 				break
 			}
@@ -273,6 +392,9 @@ func (st *Pool) workerFunc(n int) {
 				if st.verbose {
 					log.Printf("[pool] worker %v is going to be down", n)
 				}
+
+				// confirm that the worker was killed due to a workerActionLateKill signal
+				killWorkerConfirmation = workerActionLateKillConfirmation
 
 				// break the loop
 				keepWorking = false
@@ -300,10 +422,15 @@ func (st *Pool) workerFunc(n int) {
 	}
 
 	// the worker is going to die, so decrement the active workers counter by 1
-	st.totalWorkersChan <- -1
+	//st.totalWorkersChan <- -1
+	st.totalWorkersChan <- workerAction{
+		Action: killWorkerConfirmation,
+		Value:  1,
+	}
 }
 
 // AddTask adds a task/job to the FIFO queue.
+// It will return an error if no new tasks could be enqueued at the execution time.
 func (st *Pool) AddTask(data interface{}) error {
 	if !st.doNotProcess {
 		st.jobsChan <- data
@@ -314,79 +441,81 @@ func (st *Pool) AddTask(data interface{}) error {
 }
 
 // AddWorker adds a new worker to the pool.
-func (st *Pool) AddWorker() {
-	st.startWorker()
+// It returns an error in case the worker could not be started.
+func (st *Pool) AddWorker() error {
+	return st.startWorker()
 }
 
 // AddWorkers adds n extra workers to the pool.
-func (st *Pool) AddWorkers(n int) {
+// It returns an error in case the a worker could not be started.
+func (st *Pool) AddWorkers(n int) error {
+	var err error
 	for i := 0; i < n; i++ {
-		st.startWorker()
+		if err = st.AddWorker(); err != nil {
+			return err
+		}
 	}
+
+	return nil
 }
 
 // KillWorker kills an idle worker.
 // The kill signal has a higher priority than the enqueued jobs. It means that a worker will be killed once it finishes its current job although there are unprocessed jobs in the queue.
 // Use LateKillWorker() in case you need to wait until current enqueued jobs get processed.
 func (st *Pool) KillWorker() {
-	st.immediateChan <- immediateSignalKillAfterTask
+	// sends a signal to kill a worker
+	st.totalWorkersChan <- workerAction{
+		Action: workerActionKill,
+		Value:  1,
+	}
 }
 
 // KillWorkers kills n idle workers.
 // If n > GetTotalWorkers(), then this function will assign GetTotalWorkers() to n.
-// The kill signal has a higher priority than the enqueued jobs. It means that a worker will be killed once it finishes its current job although there are unprocessed jobs in the queue.
+// The kill signal has a higher priority than the enqueued jobs. It means that a worker will be killed once it finishes its current job, no matter if there are unprocessed jobs in the queue.
 // Use LateKillAllWorkers() ot LateKillWorker() in case you need to wait until current enqueued jobs get processed.
 func (st *Pool) KillWorkers(n int) {
-	totalWorkers := st.GetTotalWorkers()
-	if n > totalWorkers {
-		n = totalWorkers
-	}
-
-	for i := 0; i < n; i++ {
-		st.KillWorker()
+	// sends a signal to kill n workers
+	st.totalWorkersChan <- workerAction{
+		Action: workerActionKill,
+		Value:  n,
 	}
 }
 
-// KillAllWorkers kills all alive workers.
-// If a worker is processing a job, it will not be killed, the pool will wait until it is idle.
+// KillAllWorkers kills all live workers (the number of live workers is determined at the moment that this action is processed).
+// If a worker is processing a job, it will not be immediately killed, the pool will wait until the current job gets processed.
 func (st *Pool) KillAllWorkers() {
-	// get the current "totalWorkers"
-	total := st.totalWorkers
-
-	// kill all workers
-	for i := 0; i < total; i++ {
-		st.KillWorker()
+	// sends a signal to kill all active workers
+	st.totalWorkersChan <- workerAction{
+		Action: workerActionKill,
+		Value:  -1, // -1 ==> all live workers
 	}
 }
 
-// LateKillWorker kills a worker only after all current jobs get processed.
+// LateKillWorker kills a worker only after current enqueued jobs get processed.
 func (st *Pool) LateKillWorker() {
-	st.jobsChan <- nil
+	// sends a signal to late kill a worker
+	st.totalWorkersChan <- workerAction{
+		Action: workerActionLateKill,
+		Value:  1,
+	}
 }
 
 // LateKillWorkers kills n workers only after all current jobs get processed.
 // If n > GetTotalWorkers(), then this function will assign GetTotalWorkers() to n.
 func (st *Pool) LateKillWorkers(n int) {
-	// get the current "totalWorkers"
-	totalWorkers := st.totalWorkers
-
-	if n > totalWorkers {
-		n = totalWorkers
-	}
-
-	for i := 0; i < n; i++ {
-		st.LateKillWorker()
+	// sends a signal to late kill n workers
+	st.totalWorkersChan <- workerAction{
+		Action: workerActionLateKill,
+		Value:  n,
 	}
 }
 
 // LateKillAllWorkers kill all live workers only after all current jobs get processed
 func (st *Pool) LateKillAllWorkers() {
-	// get the current "totalWorkers"
-	total := st.totalWorkers
-
-	// kill all workers
-	for i := 0; i < total; i++ {
-		st.LateKillWorker()
+	st.totalWorkersChan <- workerAction{
+		Action: workerActionLateKill,
+		Value:  -1,
 	}
 }
 
