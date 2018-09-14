@@ -379,6 +379,10 @@ func (st *Pool) workerFunc(n int) {
 
 	keepWorking := true
 	for keepWorking {
+
+		// *******************************************************************************************************
+		// ** Listen to the immediate action channel *************************************************************
+		// *******************************************************************************************************
 		select {
 		// listen to the immediate channel
 		case immediate, ok := <-st.immediateChan:
@@ -405,6 +409,14 @@ func (st *Pool) workerFunc(n int) {
 				break
 			}
 
+		default:
+
+		}
+
+		// *******************************************************************************************************
+		// ** Listen to the jobs channel *************************************************************************
+		// *******************************************************************************************************
+		select {
 		// listen to the jobs/tasks channel
 		case taskData, ok := <-st.jobsChan:
 			if !ok {
@@ -447,6 +459,9 @@ func (st *Pool) workerFunc(n int) {
 					// TODO ::: save the job result ...
 				}
 			}
+
+		default:
+
 		}
 	}
 
