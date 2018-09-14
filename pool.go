@@ -3,6 +3,7 @@ package workerpool
 
 import (
 	"log"
+	"sync"
 
 	"github.com/pkg/errors"
 )
@@ -32,6 +33,8 @@ const (
 	waitForWait = "wait"
 	// WaitUntilNSuccesses()
 	waitForNSuccesses = "waitNSuccesses"
+
+	broadMessagePause = "pause"
 )
 
 // PoolFunc defines the function signature to be implemented by the worker's func
@@ -71,6 +74,9 @@ type Pool struct {
 	waitForWaitChannel chan bool
 	// channel to send the "done" signal for WaitUntilNSuccesses(...)
 	waitForNSuccessesChannel chan bool
+
+	// to send the same message to all workers
+	broadMessages sync.Map
 
 	// log steps
 	verbose bool
@@ -118,6 +124,9 @@ func (st *Pool) initialize(initialWorkers int, maxJobsInChannel int, verbose boo
 
 	st.waitForWaitChannel = make(chan bool)
 	st.waitForNSuccessesChannel = make(chan bool)
+
+	// set broad messages default values
+	st.broadMessages.Store(broadMessagePause, false)
 }
 
 // workerListener handles all up/down worker operations && keeps workers stats updated (st.totalWorkers)
@@ -377,11 +386,33 @@ func (st *Pool) workerFunc(n int) {
 		}
 	}()
 
-	keepWorking := true
+	var (
+		keepWorking      = true
+		broadMsgPauseTmp interface{}
+		broadMsgPause    bool
+		ok               bool
+	)
+
 	for keepWorking {
 
 		// *******************************************************************************************************
+		// ** Listen to the immediate broad signals **************************************************************
+		// *******************************************************************************************************
+		// *** Actions:
+		// ***  - Pause
+		// *******************************************************************************************************
+
+		// get the pause
+		broadMsgPauseTmp, ok = st.broadMessages.Load(broadMessagePause)
+		if ok {
+			broadMsgPause = broadMsgPauseTmp.(bool)
+		}
+
+		// *******************************************************************************************************
 		// ** Listen to the immediate action channel *************************************************************
+		// *******************************************************************************************************
+		// *** Actions:
+		// ***  - Kill
 		// *******************************************************************************************************
 		select {
 		// listen to the immediate channel
@@ -416,52 +447,59 @@ func (st *Pool) workerFunc(n int) {
 		// *******************************************************************************************************
 		// ** Listen to the jobs channel *************************************************************************
 		// *******************************************************************************************************
-		select {
-		// listen to the jobs/tasks channel
-		case taskData, ok := <-st.jobsChan:
-			if !ok {
-				if st.verbose {
-					log.Printf("[pool] worker %v is going to be down because of the jobs channel is closed", n)
+		// *** Actions:
+		// ***  - LateKill
+		// *******************************************************************************************************
+
+		// do not listen to jobsChan if broadMessagePause == true
+		if !broadMsgPause {
+			select {
+			// listen to the jobs/tasks channel
+			case taskData, ok := <-st.jobsChan:
+				if !ok {
+					if st.verbose {
+						log.Printf("[pool] worker %v is going to be down because of the jobs channel is closed", n)
+					}
+					// break the loop
+					keepWorking = false
+					break
 				}
-				// break the loop
-				keepWorking = false
-				break
-			}
 
-			// late kill signal
-			if taskData == nil {
-				if st.verbose {
-					log.Printf("[pool] worker %v is going to be down", n)
+				// late kill signal
+				if taskData == nil {
+					if st.verbose {
+						log.Printf("[pool] worker %v is going to be down", n)
+					}
+
+					// confirm that the worker was killed due to a workerActionLateKill signal
+					killWorkerConfirmation = workerActionLateKillConfirmation
+
+					// break the loop
+					keepWorking = false
+					break
 				}
 
-				// confirm that the worker was killed due to a workerActionLateKill signal
-				killWorkerConfirmation = workerActionLateKillConfirmation
+				if st.doNotProcess {
+					// TODO ::: re-enqueue in a different queue/channel/struct
+					// re-enqueue the job / task
+					st.AddTask(taskData)
 
-				// break the loop
-				keepWorking = false
-				break
-			}
-
-			if st.doNotProcess {
-				// TODO ::: re-enqueue in a different queue/channel/struct
-				// re-enqueue the job / task
-				st.AddTask(taskData)
-
-			} else {
-				// execute the job
-				fnSuccess := st.fn(taskData)
-
-				// avoid to cause deadlock
-				if !st.doNotProcess {
-					// keep track of the job's result
-					st.fnSuccessChan <- fnSuccess
 				} else {
-					// TODO ::: save the job result ...
+					// execute the job
+					fnSuccess := st.fn(taskData)
+
+					// avoid to cause deadlock
+					if !st.doNotProcess {
+						// keep track of the job's result
+						st.fnSuccessChan <- fnSuccess
+					} else {
+						// TODO ::: save the job result ...
+					}
 				}
+
+			default:
+
 			}
-
-		default:
-
 		}
 	}
 
@@ -555,12 +593,24 @@ func (st *Pool) LateKillWorkers(n int) {
 	}
 }
 
-// LateKillAllWorkers kill all live workers only after all current jobs get processed
+// LateKillAllWorkers kills all live workers only after all current jobs get processed
 func (st *Pool) LateKillAllWorkers() {
 	st.totalWorkersChan <- workerAction{
 		Action: workerActionLateKill,
 		Value:  -1,
 	}
+}
+
+// PauseAllWorkers pauses all live workers.
+// The jobs that are being processed at the time this function is invoked will not be interrupted.
+// All enqueued jobs will not be processed until the workers get resumed.
+func (st *Pool) PauseAllWorkers() {
+	st.broadMessages.Store(broadMessagePause, true)
+}
+
+// ResumeAllWorkers resumes all live workers.
+func (st *Pool) ResumeAllWorkers() {
+	st.broadMessages.Store(broadMessagePause, false)
 }
 
 // GetTotalWorkers returns the number of active/live workers.
