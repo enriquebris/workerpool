@@ -428,10 +428,13 @@ func (st *Pool) workerFunc(n int) {
 	for keepWorking {
 
 		// *******************************************************************************************************
-		// ** Listen to the immediate broad signals **************************************************************
+		// ** Listen to the immediate broad messages *************************************************************
+		// ** These messages don't come through a channel, they come as part of st.broadMessages (sync.Map).  ****
+		// ** The idea is to execute actions over the workers as soon as possible.  ******************************
 		// *******************************************************************************************************
 		// *** Actions:
-		// ***  - Pause
+		// ***  - Pause all workers
+		// ***  - Kill all workers
 		// *******************************************************************************************************
 
 		// get the pause
