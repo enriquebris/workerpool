@@ -1,6 +1,7 @@
 // On this example:
 //  - 10 workers will be running forever
 //  - 30 jobs will be enqueued to be processed by the workers
+//  - workers will exit after processing first 30 jobs
 
 package main
 
@@ -32,7 +33,7 @@ func main() {
 		return true
 	})
 
-	// start up the workers
+	// start up the workers (10 workers)
 	pool.StartWorkers()
 
 	// add tasks in a separate goroutine
@@ -40,7 +41,13 @@ func main() {
 		for i := 0; i < 30; i++ {
 			pool.AddTask(i)
 		}
+
+		// kill all active workers after current enqueued jobs get processed
+		pool.LateKillAllWorkers()
 	}()
+
+	// set the number of live workers to 20
+	pool.SetTotalWorkers(20)
 
 	// wait while at least one worker is alive
 	pool.Wait()
