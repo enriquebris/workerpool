@@ -318,7 +318,7 @@ func (st *Pool) Wait() error {
 	return nil
 }
 
-// WaitUntilNSuccesses waits until n workers finished their job successfully.
+// WaitUntilNSuccesses waits until n workers finished their job successfully, then kills all active workers.
 // A worker is considered successfully if the associated worker function returned true.
 // An error will be returned if the worker's function is not already set.
 func (st *Pool) WaitUntilNSuccesses(n int) error {
@@ -349,7 +349,7 @@ func (st *Pool) WaitUntilNSuccesses(n int) error {
 	}
 
 	// kill all active workers
-	st.KillAllWorkers()
+	st.KillAllWorkersAndWait()
 
 	// tell workers: you can accept / process new jobs && start accepting new jobs
 	st.doNotProcess = false
