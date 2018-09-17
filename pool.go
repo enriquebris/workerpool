@@ -23,8 +23,10 @@ const (
 	// confirm that a worker exited because a workerActionKill signal
 	workerActionKillConfirmation = "kill.confirmation"
 
-	// "kill all worker(s)" signal
+	// "kill all workers" signal
 	workerActionKillAllWorkers = "killAllWorkers"
+	// "kill all workers and wait" signal
+	workerActionKillAllWorkersAndWait = "killAllWorkersAndWait"
 	// confirm that a worker exited because a workerActionKillAllWorkers signal
 	workerActionKillAllWorkersConfirmation = "killAllWorkers.confirmation"
 
@@ -86,6 +88,8 @@ type Pool struct {
 	waitForWaitChannel chan bool
 	// channel to send the "done" signal for WaitUntilNSuccesses(...)
 	waitForNSuccessesChannel chan bool
+	// channel to send the "done" signal after all workers get killed bc a workerActionKillAllWorkersAndWait signal
+	waitForActionKillAllWorkersAndWait chan bool
 
 	// to send the same message to all workers
 	broadMessages sync.Map
@@ -174,6 +178,11 @@ func (st *Pool) workerListener() {
 				// send a broad message to kill all workers
 				st.broadMessages.Store(broadMessageKillAllWorkers, true)
 
+			// kill all workers and wait until they get killed
+			case workerActionKillAllWorkersAndWait:
+				// send a broad message to kill all workers
+				st.broadMessages.Store(broadMessageKillAllWorkers, true)
+
 			// "kill all workers" confirmation from the worker
 			case workerActionKillAllWorkersConfirmation:
 				st.totalWorkers -= message.Value
@@ -181,6 +190,11 @@ func (st *Pool) workerListener() {
 				// set the "kill all workers" broad flag to false once all live workers were killed
 				if st.totalWorkers == 0 {
 					st.broadMessages.Store(broadMessageKillAllWorkers, false)
+
+					// send the "done" signal to KillAllWorkersAndWait, all workers are down
+					if st.waitForActionKillAllWorkersAndWait != nil {
+						st.waitForActionKillAllWorkersAndWait <- true
+					}
 				}
 
 			// kill worker(s)
@@ -304,7 +318,7 @@ func (st *Pool) Wait() error {
 	return nil
 }
 
-// WaitUntilNSuccesses waits until n workers finished their job successfully.
+// WaitUntilNSuccesses waits until n workers finished their job successfully, then kills all active workers.
 // A worker is considered successfully if the associated worker function returned true.
 // An error will be returned if the worker's function is not already set.
 func (st *Pool) WaitUntilNSuccesses(n int) error {
@@ -335,7 +349,7 @@ func (st *Pool) WaitUntilNSuccesses(n int) error {
 	}
 
 	// kill all active workers
-	st.KillAllWorkers()
+	st.KillAllWorkersAndWait()
 
 	// tell workers: you can accept / process new jobs && start accepting new jobs
 	st.doNotProcess = false
@@ -659,6 +673,35 @@ func (st *Pool) KillAllWorkers() {
 	st.totalWorkersChan <- workerAction{
 		Action: workerActionKillAllWorkers,
 	}
+}
+
+// KillAllWorkersAndWait kills all live workers (the number of live workers is determined at the moment this action is processed).
+// This function waits until current alive workers are down. This is the difference between KillAllWorkersAndWait() and KillAllWorkers()
+// If a worker is processing a job, it will not be immediately killed, the pool will wait until the current job gets processed.
+//
+// The following functions will return error if invoked during this function execution:
+//
+//  - KillWorker
+//  - KillWorkers
+//  - LateKillWorker
+//  - LateKillWorkers
+//  - LateKillAllWorkers
+//  - AddWorker
+//  - AddWorkers
+//  - SetTotalWorkers
+func (st *Pool) KillAllWorkersAndWait() {
+	// the channel acts both as a channel and as a flag (as a flag to let know the pool that it has to send a signal through the channel once all workers are down)
+	st.waitForActionKillAllWorkersAndWait = make(chan bool)
+
+	// sends a signal to kill all active workers
+	st.totalWorkersChan <- workerAction{
+		Action: workerActionKillAllWorkersAndWait,
+	}
+
+	// wait for the done signal ==> all workers are down
+	<-st.waitForActionKillAllWorkersAndWait
+
+	st.waitForActionKillAllWorkersAndWait = nil
 }
 
 // LateKillWorker kills a worker only after current enqueued jobs get processed.
