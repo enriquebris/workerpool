@@ -3,13 +3,18 @@ package workerpool
 
 import (
 	"log"
+	"sync"
 
 	"github.com/pkg/errors"
 )
 
 const (
+	// immediate signal to kill a worker
 	immediateSignalKillAfterTask = 0
-	errorNoWorkerFuncMsg         = "The Worker Func is needed to invoke %v. You should set it using SetWorkerFunc(...)"
+
+	// error messages
+	errorNoWorkerFuncMsg   = "The Worker Func is needed to invoke %v. You should set it using SetWorkerFunc(...)"
+	errorKillAllWorkersMsg = "There is an active KillAllWorkers operation"
 
 	// "add new worker(s)" signal
 	workerActionAdd = "add"
@@ -17,6 +22,14 @@ const (
 	workerActionKill = "kill"
 	// confirm that a worker exited because a workerActionKill signal
 	workerActionKillConfirmation = "kill.confirmation"
+
+	// "kill all workers" signal
+	workerActionKillAllWorkers = "killAllWorkers"
+	// "kill all workers and wait" signal
+	workerActionKillAllWorkersAndWait = "killAllWorkersAndWait"
+	// confirm that a worker exited because a workerActionKillAllWorkers signal
+	workerActionKillAllWorkersConfirmation = "killAllWorkers.confirmation"
+
 	// "kill late worker" signal
 	workerActionLateKill = "lateKill"
 	// confirm that a worker exited because a workerActionKillConfirmation signal
@@ -32,6 +45,10 @@ const (
 	waitForWait = "wait"
 	// WaitUntilNSuccesses()
 	waitForNSuccesses = "waitNSuccesses"
+
+	// broad messages
+	broadMessagePause          = "pause"
+	broadMessageKillAllWorkers = "killAllWorkers"
 )
 
 // PoolFunc defines the function signature to be implemented by the worker's func
@@ -71,6 +88,11 @@ type Pool struct {
 	waitForWaitChannel chan bool
 	// channel to send the "done" signal for WaitUntilNSuccesses(...)
 	waitForNSuccessesChannel chan bool
+	// channel to send the "done" signal after all workers get killed bc a workerActionKillAllWorkersAndWait signal
+	waitForActionKillAllWorkersAndWait chan bool
+
+	// to send the same message to all workers
+	broadMessages sync.Map
 
 	// log steps
 	verbose bool
@@ -118,6 +140,10 @@ func (st *Pool) initialize(initialWorkers int, maxJobsInChannel int, verbose boo
 
 	st.waitForWaitChannel = make(chan bool)
 	st.waitForNSuccessesChannel = make(chan bool)
+
+	// set broad messages default values
+	st.broadMessages.Store(broadMessagePause, false)
+	st.broadMessages.Store(broadMessageKillAllWorkers, false)
 }
 
 // workerListener handles all up/down worker operations && keeps workers stats updated (st.totalWorkers)
@@ -147,15 +173,35 @@ func (st *Pool) workerListener() {
 					}
 				}
 
+			// kill all workers
+			case workerActionKillAllWorkers:
+				// send a broad message to kill all workers
+				st.broadMessages.Store(broadMessageKillAllWorkers, true)
+
+			// kill all workers and wait until they get killed
+			case workerActionKillAllWorkersAndWait:
+				// send a broad message to kill all workers
+				st.broadMessages.Store(broadMessageKillAllWorkers, true)
+
+			// "kill all workers" confirmation from the worker
+			case workerActionKillAllWorkersConfirmation:
+				st.totalWorkers -= message.Value
+
+				// set the "kill all workers" broad flag to false once all live workers were killed
+				if st.totalWorkers == 0 {
+					st.broadMessages.Store(broadMessageKillAllWorkers, false)
+
+					// send the "done" signal to KillAllWorkersAndWait, all workers are down
+					if st.waitForActionKillAllWorkersAndWait != nil {
+						st.waitForActionKillAllWorkersAndWait <- true
+					}
+				}
+
 			// kill worker(s)
 			case workerActionKill:
 				totalWorkers := st.GetTotalWorkers()
 				if message.Value > totalWorkers {
 					message.Value = totalWorkers
-				} else {
-					if message.Value == -1 {
-						message.Value = totalWorkers
-					}
 				}
 
 				for i := 0; i < message.Value; i++ {
@@ -272,7 +318,7 @@ func (st *Pool) Wait() error {
 	return nil
 }
 
-// WaitUntilNSuccesses waits until n workers finished their job successfully.
+// WaitUntilNSuccesses waits until n workers finished their job successfully, then kills all active workers.
 // A worker is considered successfully if the associated worker function returned true.
 // An error will be returned if the worker's function is not already set.
 func (st *Pool) WaitUntilNSuccesses(n int) error {
@@ -303,7 +349,7 @@ func (st *Pool) WaitUntilNSuccesses(n int) error {
 	}
 
 	// kill all active workers
-	st.KillAllWorkers()
+	st.KillAllWorkersAndWait()
 
 	// tell workers: you can accept / process new jobs && start accepting new jobs
 	st.doNotProcess = false
@@ -320,12 +366,20 @@ func (st *Pool) SetWorkerFunc(fn PoolFunc) {
 
 // SetTotalWorkers sets the number of live workers.
 // It adjusts the current number of live workers based on the given number. In case that it have to kill some workers, it will wait until the current jobs get processed.
-func (st *Pool) SetTotalWorkers(n int) {
+// It returns an error in case there is a "in course" KillAllWorkers operation.
+func (st *Pool) SetTotalWorkers(n int) error {
+	// return en error if there is an "in course" KillAllWorkers operation
+	if tmp, ok := st.broadMessages.Load(broadMessageKillAllWorkers); ok && tmp.(bool) {
+		return errors.New(errorKillAllWorkersMsg)
+	}
+
 	// sends a "set total workers" signal, to be processed by workerListener()
 	st.totalWorkersChan <- workerAction{
 		Action: workerActionSetTotalWorkers,
 		Value:  n,
 	}
+
+	return nil
 }
 
 // StartWorkers start all workers. The number of workers was set at the Pool instantiation (NewPool(...) function).
@@ -377,8 +431,50 @@ func (st *Pool) workerFunc(n int) {
 		}
 	}()
 
-	keepWorking := true
+	var (
+		keepWorking            = true
+		broadMsgTmp            interface{}
+		broadMsgPause          bool
+		broadMsgKillAllWorkers bool
+		ok                     bool
+	)
+
 	for keepWorking {
+
+		// *******************************************************************************************************
+		// ** Listen to the immediate broad messages *************************************************************
+		// ** These messages don't come through a channel, they come as part of st.broadMessages (sync.Map).  ****
+		// ** The idea is to execute actions over the workers as soon as possible.  ******************************
+		// *******************************************************************************************************
+		// *** Actions:
+		// ***  - Pause all workers
+		// ***  - Kill all workers
+		// *******************************************************************************************************
+
+		// get the pause
+		if broadMsgTmp, ok = st.broadMessages.Load(broadMessagePause); ok {
+			broadMsgPause = broadMsgTmp.(bool)
+		}
+
+		// get the "kill all workers"
+		if broadMsgTmp, ok = st.broadMessages.Load(broadMessageKillAllWorkers); ok {
+			broadMsgKillAllWorkers = broadMsgTmp.(bool)
+
+			if broadMsgKillAllWorkers {
+				// confirm that the worker was killed due to a workerActionKill signal
+				killWorkerConfirmation = workerActionKillAllWorkersConfirmation
+
+				keepWorking = false
+				break
+			}
+		}
+
+		// *******************************************************************************************************
+		// ** Listen to the immediate action channel *************************************************************
+		// *******************************************************************************************************
+		// *** Actions:
+		// ***  - Kill
+		// *******************************************************************************************************
 		select {
 		// listen to the immediate channel
 		case immediate, ok := <-st.immediateChan:
@@ -405,47 +501,65 @@ func (st *Pool) workerFunc(n int) {
 				break
 			}
 
-		// listen to the jobs/tasks channel
-		case taskData, ok := <-st.jobsChan:
-			if !ok {
-				if st.verbose {
-					log.Printf("[pool] worker %v is going to be down because of the jobs channel is closed", n)
+		default:
+
+		}
+
+		// *******************************************************************************************************
+		// ** Listen to the jobs channel *************************************************************************
+		// *******************************************************************************************************
+		// *** Actions:
+		// ***  - LateKill
+		// *******************************************************************************************************
+
+		// do not listen to jobsChan if broadMessagePause == true
+		if !broadMsgPause {
+			select {
+			// listen to the jobs/tasks channel
+			case taskData, ok := <-st.jobsChan:
+				if !ok {
+					if st.verbose {
+						log.Printf("[pool] worker %v is going to be down because of the jobs channel is closed", n)
+					}
+					// break the loop
+					keepWorking = false
+					break
 				}
-				// break the loop
-				keepWorking = false
-				break
-			}
 
-			// late kill signal
-			if taskData == nil {
-				if st.verbose {
-					log.Printf("[pool] worker %v is going to be down", n)
+				// late kill signal
+				if taskData == nil {
+					if st.verbose {
+						log.Printf("[pool] worker %v is going to be down", n)
+					}
+
+					// confirm that the worker was killed due to a workerActionLateKill signal
+					killWorkerConfirmation = workerActionLateKillConfirmation
+
+					// break the loop
+					keepWorking = false
+					break
 				}
 
-				// confirm that the worker was killed due to a workerActionLateKill signal
-				killWorkerConfirmation = workerActionLateKillConfirmation
+				if st.doNotProcess {
+					// TODO ::: re-enqueue in a different queue/channel/struct
+					// re-enqueue the job / task
+					st.AddTask(taskData)
 
-				// break the loop
-				keepWorking = false
-				break
-			}
-
-			if st.doNotProcess {
-				// TODO ::: re-enqueue in a different queue/channel/struct
-				// re-enqueue the job / task
-				st.AddTask(taskData)
-
-			} else {
-				// execute the job
-				fnSuccess := st.fn(taskData)
-
-				// avoid to cause deadlock
-				if !st.doNotProcess {
-					// keep track of the job's result
-					st.fnSuccessChan <- fnSuccess
 				} else {
-					// TODO ::: save the job result ...
+					// execute the job
+					fnSuccess := st.fn(taskData)
+
+					// avoid to cause deadlock
+					if !st.doNotProcess {
+						// keep track of the job's result
+						st.fnSuccessChan <- fnSuccess
+					} else {
+						// TODO ::: save the job result ...
+					}
 				}
+
+			default:
+
 			}
 		}
 	}
@@ -470,14 +584,28 @@ func (st *Pool) AddTask(data interface{}) error {
 }
 
 // AddWorker adds a new worker to the pool.
-// It returns an error in case the worker could not be started.
+// It returns an error if at least one of the following statements are true:
+//  - the worker could not be started
+//  - there is a "in course" KillAllWorkers operation
 func (st *Pool) AddWorker() error {
+	// return en error if there is an "in course" KillAllWorkers operation
+	if tmp, ok := st.broadMessages.Load(broadMessageKillAllWorkers); ok && tmp.(bool) {
+		return errors.New(errorKillAllWorkersMsg)
+	}
+
 	return st.startWorker()
 }
 
 // AddWorkers adds n extra workers to the pool.
-// It returns an error in case the a worker could not be started.
+// It returns an error if at least one of the following statements are true:
+//  - the worker could not be started
+//  - there is a "in course" KillAllWorkers operation
 func (st *Pool) AddWorkers(n int) error {
+	// return en error if there is an "in course" KillAllWorkers operation
+	if tmp, ok := st.broadMessages.Load(broadMessageKillAllWorkers); ok && tmp.(bool) {
+		return errors.New(errorKillAllWorkersMsg)
+	}
+
 	var err error
 	for i := 0; i < n; i++ {
 		if err = st.AddWorker(); err != nil {
@@ -491,61 +619,152 @@ func (st *Pool) AddWorkers(n int) error {
 // KillWorker kills an idle worker.
 // The kill signal has a higher priority than the enqueued jobs. It means that a worker will be killed once it finishes its current job although there are unprocessed jobs in the queue.
 // Use LateKillWorker() in case you need to wait until current enqueued jobs get processed.
-func (st *Pool) KillWorker() {
+// It returns an error in case there is a "in course" KillAllWorkers operation.
+func (st *Pool) KillWorker() error {
+	// return en error if there is an "in course" KillAllWorkers operation
+	if tmp, ok := st.broadMessages.Load(broadMessageKillAllWorkers); ok && tmp.(bool) {
+		return errors.New(errorKillAllWorkersMsg)
+	}
+
 	// sends a signal to kill a worker
 	st.totalWorkersChan <- workerAction{
 		Action: workerActionKill,
 		Value:  1,
 	}
+
+	return nil
 }
 
 // KillWorkers kills n idle workers.
 // If n > GetTotalWorkers(), then this function will assign GetTotalWorkers() to n.
 // The kill signal has a higher priority than the enqueued jobs. It means that a worker will be killed once it finishes its current job, no matter if there are unprocessed jobs in the queue.
 // Use LateKillAllWorkers() ot LateKillWorker() in case you need to wait until current enqueued jobs get processed.
-func (st *Pool) KillWorkers(n int) {
+// It returns an error in case there is a "in course" KillAllWorkers operation.
+func (st *Pool) KillWorkers(n int) error {
+	// return en error if there is an "in course" KillAllWorkers operation
+	if tmp, ok := st.broadMessages.Load(broadMessageKillAllWorkers); ok && tmp.(bool) {
+		return errors.New(errorKillAllWorkersMsg)
+	}
+
 	// sends a signal to kill n workers
 	st.totalWorkersChan <- workerAction{
 		Action: workerActionKill,
 		Value:  n,
 	}
+
+	return nil
 }
 
-// KillAllWorkers kills all live workers (the number of live workers is determined at the moment that this action is processed).
+// KillAllWorkers kills all live workers (the number of live workers is determined at the moment this action is processed).
 // If a worker is processing a job, it will not be immediately killed, the pool will wait until the current job gets processed.
+//
+// The following functions will return error if invoked during this function execution:
+//
+//  - KillWorker
+//  - KillWorkers
+//  - LateKillWorker
+//  - LateKillWorkers
+//  - LateKillAllWorkers
+//  - AddWorker
+//  - AddWorkers
+//  - SetTotalWorkers
 func (st *Pool) KillAllWorkers() {
 	// sends a signal to kill all active workers
 	st.totalWorkersChan <- workerAction{
-		Action: workerActionKill,
-		Value:  -1, // -1 ==> all live workers
+		Action: workerActionKillAllWorkers,
 	}
 }
 
+// KillAllWorkersAndWait kills all live workers (the number of live workers is determined at the moment this action is processed).
+// This function waits until current alive workers are down. This is the difference between KillAllWorkersAndWait() and KillAllWorkers()
+// If a worker is processing a job, it will not be immediately killed, the pool will wait until the current job gets processed.
+//
+// The following functions will return error if invoked during this function execution:
+//
+//  - KillWorker
+//  - KillWorkers
+//  - LateKillWorker
+//  - LateKillWorkers
+//  - LateKillAllWorkers
+//  - AddWorker
+//  - AddWorkers
+//  - SetTotalWorkers
+func (st *Pool) KillAllWorkersAndWait() {
+	// the channel acts both as a channel and as a flag (as a flag to let know the pool that it has to send a signal through the channel once all workers are down)
+	st.waitForActionKillAllWorkersAndWait = make(chan bool)
+
+	// sends a signal to kill all active workers
+	st.totalWorkersChan <- workerAction{
+		Action: workerActionKillAllWorkersAndWait,
+	}
+
+	// wait for the done signal ==> all workers are down
+	<-st.waitForActionKillAllWorkersAndWait
+
+	st.waitForActionKillAllWorkersAndWait = nil
+}
+
 // LateKillWorker kills a worker only after current enqueued jobs get processed.
-func (st *Pool) LateKillWorker() {
+// It returns an error in case there is a "in course" KillAllWorkers operation.
+func (st *Pool) LateKillWorker() error {
+	// return en error if there is an "in course" KillAllWorkers operation
+	if tmp, ok := st.broadMessages.Load(broadMessageKillAllWorkers); ok && tmp.(bool) {
+		return errors.New(errorKillAllWorkersMsg)
+	}
+
 	// sends a signal to late kill a worker
 	st.totalWorkersChan <- workerAction{
 		Action: workerActionLateKill,
 		Value:  1,
 	}
+
+	return nil
 }
 
 // LateKillWorkers kills n workers only after all current jobs get processed.
 // If n > GetTotalWorkers(), then this function will assign GetTotalWorkers() to n.
-func (st *Pool) LateKillWorkers(n int) {
+// It returns an error in case there is a "in course" KillAllWorkers operation.
+func (st *Pool) LateKillWorkers(n int) error {
+	// return en error if there is an "in course" KillAllWorkers operation
+	if tmp, ok := st.broadMessages.Load(broadMessageKillAllWorkers); ok && tmp.(bool) {
+		return errors.New(errorKillAllWorkersMsg)
+	}
+
 	// sends a signal to late kill n workers
 	st.totalWorkersChan <- workerAction{
 		Action: workerActionLateKill,
 		Value:  n,
 	}
+
+	return nil
 }
 
-// LateKillAllWorkers kill all live workers only after all current jobs get processed
-func (st *Pool) LateKillAllWorkers() {
+// LateKillAllWorkers kills all live workers only after all current jobs get processed.
+// It returns an error in case there is a "in course" KillAllWorkers operation.
+func (st *Pool) LateKillAllWorkers() error {
+	// return en error if there is an "in course" KillAllWorkers operation
+	if tmp, ok := st.broadMessages.Load(broadMessageKillAllWorkers); ok && tmp.(bool) {
+		return errors.New(errorKillAllWorkersMsg)
+	}
+
 	st.totalWorkersChan <- workerAction{
 		Action: workerActionLateKill,
 		Value:  -1,
 	}
+
+	return nil
+}
+
+// PauseAllWorkers pauses all live workers.
+// The jobs that are being processed at the time this function is invoked will not be interrupted.
+// All enqueued jobs will not be processed until the workers get resumed.
+func (st *Pool) PauseAllWorkers() {
+	st.broadMessages.Store(broadMessagePause, true)
+}
+
+// ResumeAllWorkers resumes all live workers.
+func (st *Pool) ResumeAllWorkers() {
+	st.broadMessages.Store(broadMessagePause, false)
 }
 
 // GetTotalWorkers returns the number of active/live workers.
