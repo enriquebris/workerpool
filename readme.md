@@ -8,7 +8,11 @@ go get gopkg.in/enriquebris/workerpool.v0
 
 ## Examples
 
-### Simple usage
+See code examples at [examples](examples/) folder.
+
+## Get started
+
+#### Simple usage
 
 ```go
 package main
@@ -57,7 +61,7 @@ func main() {
 
 ```
 
-### Set the worker's function
+#### Set the worker's function
 
 Each time a worker receives a job, it invokes this function passing the job data as the only parameter.
 
@@ -70,12 +74,12 @@ pool.SetWorkerFunc(func(data interface{}) bool {
 	})
 ```
 
-### Enqueue a job
+#### Enqueue a job
 ```go
 pool.AddTask(data)
 ```
 
-### Pass multiple data to be processed by a worker
+#### Pass multiple data to be processed by a worker
 
 Let's suppose you have the following struct:
 
@@ -99,12 +103,12 @@ pool.AddTask(JobData{
 
 Keep in mind that the worker's function needs to cast the parameter as a JobData (that is on your side).
 
-### Add an extra worker on the fly
+#### Add an extra worker on the fly
 ```go
 pool.AddWorker()
 ```
 
-### Kill a worker on the fly
+#### Kill a worker on the fly
 
 Kill a live worker once it is idle or it finishes its current job.
 
@@ -112,7 +116,15 @@ Kill a live worker once it is idle or it finishes its current job.
 pool.KillWorker()
 ```
 
-### Kill all workers
+#### Set the number of workers on the fly
+
+Adjust the total of live workers by the given number.
+
+```go
+pool.SetTotalWorkers(n)
+```
+
+#### Kill all workers
 
 Kill all live workers once they are idle or they finish processing their current jobs.
 
@@ -120,22 +132,68 @@ Kill all live workers once they are idle or they finish processing their current
 pool.KillWorker()
 ```
 
-### Kill a worker after current enqueued jobs get processed
+#### Kill a worker after current enqueued jobs get processed
 
 ```go
 pool.LateKillWorker()
 ```
 
-### Wait while at least one worker is alive
+#### Wait while at least one worker is alive
 
 ```go
 pool.Wait()
 ```
 
-### Wait while n workers successfully finish their jobs
+#### Wait while n workers successfully finish their jobs
 
 The worker function returns true or false. True means that the job was successfully finished. False means the opposite.
 
 ```go
 pool.WaitUntilNSuccesses(n)
 ```
+
+
+## History
+
+### v0.6
+
+ - Pause / Resume all workers:
+   - PauseAllWorkers() 
+   - ResumeAllWorkers()
+ - Workers will listen to higher priority channels first
+ - Workers will listen to broad messages (kill all workers, ...) before get signals from any other channel:
+   - KillAllWorkers()
+   - KillAllWorkersAndWait()
+ - Added function to kill all workers (send a broad message to all workers) and wait until it happens:
+   - pool.KillAllWorkersAndWait()
+ - Added code examples
+   
+   
+### v0.5
+
+ - Make Wait() listen to a channel (instead of use an endless for loop)
+ 
+### v0.4
+
+ - Sync actions over workers. A FIFO queue was created for the following actions:
+   - Add new worker
+   - Kill worker(s)
+   - Late kill worker(s)
+   - Set total workers 
+   
+### v0.3
+
+ - Added function to adjust number of live workers:
+   - pool.SetTotalWorkers(n)
+ - Added function to kill all live workers after current jobs get processed:
+   - pool.LateKillAllWorkers()
+   
+### v0.2
+
+ - readme.md
+ - godoc
+ - code comments
+
+### v0.1
+
+ First stable BETA version.

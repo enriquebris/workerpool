@@ -1,6 +1,7 @@
 // On this example:
-//  - 10 workers will be running forever
+//  - 10 workers will be running
 //  - 30 jobs will be enqueued to be processed by the workers
+//  - workers will exit after processing first 30 jobs
 
 package main
 
@@ -40,6 +41,9 @@ func main() {
 		for i := 0; i < 30; i++ {
 			pool.AddTask(i)
 		}
+
+		// kill all workers after the current enqueued jobs get processed
+		pool.LateKillAllWorkers()
 	}()
 
 	// wait while at least one worker is alive
